@@ -95,44 +95,38 @@ class Delegate(DefaultDelegate):
                     if timestamp < self.device.end_timestamp:
                         self.device.activity_callback(timestamp,category,intensity,steps,heart_rate)
                     i += 4
+        #Raw accel handling
+        elif hnd == self.device._char_hz.getHandle():
+            if len(data) == 20 and struct.unpack('b', data[0:1])[0] == 1:
+                self.device.queue.put((QUEUE_TYPES.RAW_ACCEL, data))
 
-        #music controls & lost device
+        #music controls
         elif(hnd == 74):
-            cmd = data[1:][0] if len(data[1:]) > 0 else None
-            if data[0] == 0x08:
-                # Start ringing
-                self.device.writeDisplayCommand([0x14, 0x00, 0x00])
-                self.device._default_lost_device()
-            elif data[0] == 0x0f:
-                # Stop ringing
-                self.device.writeDisplayCommand([0x14, 0x00, 0x01])
-                self.device._default_found_device()
-            elif cmd == 0xe0:
+            if(data[1:] == b'\xe0'):
                 self.device.setMusic()
                 if(self.device._default_music_focus_in):
                     self.device._default_music_focus_in()
-            elif cmd == 0xe1:
+            elif(data[1:]==b'\xe1'):
                 if(self.device._default_music_focus_out):
                     self.device._default_music_focus_out()
-            elif cmd == 0x00:
+            elif(data[1:]==b'\x00'):
                 if(self.device._default_music_play):
                     self.device._default_music_play()
-            elif cmd == 0x01:
+            elif(data[1:]==b'\x01'):
                 if(self.device._default_music_pause):
                     self.device._default_music_pause()
-            elif cmd == 0x03:
+            elif(data[1:]==b'\x03'):
                 if(self.device._default_music_forward):
                     self.device._default_music_forward()
-            elif cmd == 0x04:
+            elif(data[1:]==b'\x04'):
                 if(self.device._default_music_back):
                     self.device._default_music_back()
-            elif cmd == 0x05:
+            elif(data[1:]==b'\x05'):
                 if(self.device._default_music_vup):
                     self.device._default_music_vup()
-            elif cmd == 0x06:
+            elif(data[1:]==b'\x06'):
                 if(self.device._default_music_vdown):
                     self.device._default_music_vdown()
-
 
 class miband(Peripheral):
     _send_rnd_cmd = struct.pack('<2s', b'\x02\x00')
@@ -179,32 +173,17 @@ class miband(Peripheral):
         self._char_music_notif= self.svc_1.getCharacteristics(UUIDS.CHARACTERISTIC_MUSIC_NOTIFICATION)[0]
         self._desc_music_notif = self._char_music_notif.getDescriptors(forUUID=UUIDS.NOTIFICATION_DESCRIPTOR)[0]
 
+        #raw sensor access
+        self._char_hz = self.svc_1.getCharacteristics(UUIDS.CHARACTERISTIC_HZ)[0]
+        self._char_sensor = self.svc_1.getCharacteristics(UUIDS.CHARACTERISTIC_SENSOR)[0]
+        self._char_steps = self.svc_1.getCharacteristics(UUIDS.CHARACTERISTIC_STEPS)[0]
+
+
         self._auth_notif(True)
         self.enable_music()
         self.activity_notif_enabled = False
-
-        # set fallback callbacks before delegate starts
-        self.init_empty_callbacks()
-
-        # start delegate
         self.waitForNotifications(0.1)
         self.setDelegate( Delegate(self) )
-
-    def init_empty_callbacks(self):
-        def fallback():
-            return
-        self._default_music_play = fallback
-        self._default_music_pause = fallback
-        self._default_music_forward = fallback
-        self._default_music_back = fallback
-        self._default_music_vdown = fallback
-        self._default_music_vup = fallback
-        self._default_music_focus_in = fallback
-        self._default_music_focus_out = fallback
-
-        self._default_lost_device = fallback
-        self._default_found_device = fallback
-
     def generateAuthKey(self):
         if(self.authKey):
             return struct.pack('<18s',b'\x01\x00'+ self.auth_key)
@@ -348,13 +327,13 @@ class miband(Peripheral):
 
     @staticmethod
     def create_date_data(date):
-        data = struct.pack( 'hbbbbbbbxx', date.year, date.month, date.day, date.hour, date.minute, date.second, date.isoweekday(), 0 )
+        data = struct.pack( 'hbbbbbbbxx', date.year, date.month, date.day, date.hour, date.minute, date.second, date.weekday(), 0 )
         return data
 
     def _parse_battery_response(self, bytes):
         level = struct.unpack('b', bytes[1:2])[0] if len(bytes) >= 2 else None
         last_level = struct.unpack('b', bytes[19:20])[0] if len(bytes) >= 20 else None
-        status = 'normal' if struct.unpack('b', bytes[2:3])[0] == 0x0 else "charging"
+        status = 'normal' if struct.unpack('b', bytes[2:3])[0] == b'0' else "charging"
         datetime_last_charge = self._parse_date(bytes[11:18])
         datetime_last_off = self._parse_date(bytes[3:10])
 
@@ -592,24 +571,9 @@ class miband(Peripheral):
             self._char_chunked.write(chunk)
             remaining-=copybytes
 
-    def writeDisplayCommand(self, cmd):
-        '''Many display-related commands write to this endpoint.  This is a
-        simple helper used by those function.'''
-
-        char = self.svc_1.getCharacteristics(UUIDS.CHARACTERISTIC_CONFIGURATION)[0]
-        endpoint = b'\x06'
-        char.write(endpoint + bytes(cmd))
-
-    def setTrack(self, state, artist=None, album=None, track=None,
-                 volume=None,
-                 position=None, duration=None):
-        self.pp_state = state
-        self.artist = artist
-        self.album = album
+    def setTrack(self,track,state):
         self.track = track
-        self.position = position
-        self.duration = duration
-        self.volume = volume
+        self.pp_state = state
         self.setMusic()
 
     def setMusicCallback(self,play=None,pause=None,forward=None,backward=None,volumeup=None,volumedown=None,focusin=None,focusout=None):
@@ -630,62 +594,48 @@ class miband(Peripheral):
         if focusout is not None:
             self._default_music_focus_out = focusout
 
-    def setLostDeviceCallback(self, lost=None, found=None):
-        if lost is not None:
-            self._default_lost_device = lost
-        if found is not None:
-            self._default_found_device = found
-
-    def setAlarm(self, hour, minute, days=(), enabled=True, snooze=True,
-                 alarm_id=0):
-        '''Set an alarm at HOUR and MINUTE, on DAYS days.  Up to 3 alarms can be set.
-        ENABLED can be used to remove an alarm.
-        When SNOOZE is True, the alarm band will display a snooze button.'''
-        char = self.svc_1.getCharacteristics(UUIDS.CHARACTERISTIC_CONFIGURATION)[0]
-
-        alarm_tag = alarm_id
-        if enabled:
-            alarm_tag |= 0x80
-            if not snooze:
-                alarm_tag |= 0x40
-
-        repetition_mask = 0x00
-        for day in days:
-            repetition_mask |= day
-
-        packet = struct.pack("5B", 2, alarm_tag, hour, minute, repetition_mask)
-        val = char.write(packet)
-        return val
-
     def setMusic(self):
+        track = self.track
+        state = self.pp_state
+        # st=b"\x01\x00\x01\x00\x00\x00\x01\x00"
+        #self.writeChunked(3,st)
         flag = 0x00
-        flag |= 0x01
+        flag |=0x01
+        length =8
+        if(len(track)>0):
+            length+=len(track.encode('utf-8'))
+            flag |=0x0e
+        buf = bytes([flag])+bytes([state])+bytes([1,0,0,0])+bytes([1,0])
+        if(len(track)>0):
+            buf+=bytes(track,'utf-8')
+            buf+=bytes([0])
+        self.writeChunked(3,buf)
 
-        buf = b''
-        null = b'\x00'
-        if self.artist is not None:
-            flag |= 0x02
-            buf += self.artist.encode('utf-8') + null
-        if self.album is not None:
-            flag |= 0x04
-            buf += self.album.encode('utf-8') + null
-        if self.track is not None:
-            flag |= 0x08
-            buf += self.track.encode('utf-8') + null
-        if self.duration is not None:
-            flag |= 0x10
-            val = struct.pack('<H', self.duration)
-            buf += val
-        if self.volume is not None:
-            # volume goes from 0 to 100
-            flag |= 0x40
-            val = bytes([self.volume])
-            buf += val + null
+    def start_accel_realtime(self, accel_raw_callback):
+        steps_handle = self._char_steps.getHandle() + 1
+        sensor_handle = self._char_sensor.getHandle() + 1
+        hz_handle = self._char_hz.getHandle() + 1
 
-        if self.position is not None:
-            position = struct.pack('<H', self.position)
-        else:
-            position = null + null
+        self.accel_raw_callback = accel_raw_callback
 
-        buf = bytes([flag, self.pp_state, 0x00]) + position + buf
-        self.writeChunked(3, buf)
+        self.writeCharacteristic(steps_handle, b'\x00\x00', withResponse=True)
+        self.writeCharacteristic(sensor_handle, b'\x01\x00', withResponse=True)
+        self.writeCharacteristic(hz_handle, b'\x01\x00', withResponse=True)
+        self._char_sensor.write(b'\x01\x01\x19', withResponse=False)
+        self.writeCharacteristic(sensor_handle, b'\x00\x00', withResponse=True)
+        self._char_sensor.write(b'\x02', withResponse=False)
+
+        while self.waitForNotifications(1):
+            self._parse_queue()
+
+    def stop_accel_realtime(self):
+        steps_handle = self._char_steps.getHandle() + 1
+        sensor_handle = self._char_sensor.getHandle() + 1
+        hz_handle = self._char_hz.getHandle() + 1
+
+        self.writeCharacteristic(hz_handle, b'\x00\x00', withResponse=True)
+        self._char_sensor.write(b'\x03', withResponse=False)
+        self.writeCharacteristic(steps_handle, b'\x00\x00', withResponse=True)
+
+
+
